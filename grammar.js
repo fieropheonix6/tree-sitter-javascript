@@ -1,12 +1,10 @@
 /**
  * @file JavaScript grammar for tree-sitter
  * @author Max Brunsfeld <maxbrunsfeld@gmail.com>
+ * @author Amaan Qureshi <amaanq12@gmail.com>
  * @license MIT
  */
 
-/* eslint-disable arrow-parens */
-/* eslint-disable camelcase */
-/* eslint-disable-next-line spaced-comment */
 /// <reference types="tree-sitter-cli/dsl" />
 // @ts-check
 
@@ -17,10 +15,18 @@ module.exports = grammar({
     $._automatic_semicolon,
     $._template_chars,
     $._ternary_qmark,
+    $.html_comment,
+    '||',
+    // We use escape sequence and regex pattern to tell the scanner if we're currently inside a string or template string, in which case
+    // it should NOT parse html comments.
+    $.escape_sequence,
+    $.regex_pattern,
+    $.jsx_text,
   ],
 
   extras: $ => [
     $.comment,
+    $.html_comment,
     /[\s\p{Zs}\uFEFF\u2028\u2029\u2060\u200B]/,
   ],
 
@@ -35,7 +41,6 @@ module.exports = grammar({
   inline: $ => [
     $._call_signature,
     $._formal_parameter,
-    $.statement,
     $._expressions,
     $._semicolon,
     $._identifier,
@@ -53,6 +58,7 @@ module.exports = grammar({
   precedences: $ => [
     [
       'member',
+      'template_call',
       'call',
       $.update_expression,
       'unary_void',
@@ -73,11 +79,13 @@ module.exports = grammar({
       $.arrow_function,
     ],
     ['assign', $.primary_expression],
-    ['member', 'new', 'call', $.expression],
+    ['member', 'template_call', 'new', 'call', $.expression],
     ['declaration', 'literal'],
     [$.primary_expression, $.statement_block, 'object'],
+    [$.meta_property, $.import],
     [$.import_statement, $.import],
     [$.export_statement, $.primary_expression],
+    [$.lexical_declaration, $.primary_expression],
   ],
 
   conflicts: $ => [
@@ -88,6 +96,7 @@ module.exports = grammar({
     [$.primary_expression, $.rest_pattern],
     [$.primary_expression, $.pattern],
     [$.primary_expression, $._for_header],
+    [$.variable_declarator, $._for_header],
     [$.array, $.array_pattern],
     [$.object, $.object_pattern],
     [$.assignment_expression, $.pattern],
@@ -95,6 +104,7 @@ module.exports = grammar({
     [$.labeled_statement, $._property_name],
     [$.computed_property_name, $.array],
     [$.binary_expression, $._initializer],
+    [$.class_static_block, $._property_name],
   ],
 
   word: $ => $.identifier,
@@ -185,6 +195,7 @@ module.exports = grammar({
         seq($.import_clause, $._from_clause),
         field('source', $.string),
       ),
+      optional($.import_attribute),
       $._semicolon,
     ),
 
@@ -226,6 +237,8 @@ module.exports = grammar({
         field('alias', $.identifier),
       ),
     ),
+
+    import_attribute: $ => seq('with', $.object),
 
     //
     // Statements
@@ -303,14 +316,13 @@ module.exports = grammar({
     for_statement: $ => seq(
       'for',
       '(',
-      field('initializer', choice(
-        $.lexical_declaration,
-        $.variable_declaration,
-        $.expression_statement,
-        $.empty_statement,
-      )),
+      choice(
+        field('initializer', choice($.lexical_declaration, $.variable_declaration)),
+        seq(field('initializer', $._expressions), ';'),
+        field('initializer', $.empty_statement),
+      ),
       field('condition', choice(
-        $.expression_statement,
+        seq($._expressions, ';'),
         $.empty_statement,
       )),
       field('increment', optional($._expressions)),
@@ -346,6 +358,7 @@ module.exports = grammar({
             $.identifier,
             $._destructuring_pattern,
           )),
+          optional($._automatic_semicolon),
         ),
       ),
       field('operator', choice('in', 'of')),
@@ -359,12 +372,13 @@ module.exports = grammar({
       field('body', $.statement),
     ),
 
-    do_statement: $ => seq(
+    do_statement: $ => prec.right(seq(
       'do',
       field('body', $.statement),
       'while',
       field('condition', $.parenthesized_expression),
-    ),
+      optional($._semicolon),
+    )),
 
     try_statement: $ => seq(
       'try',
@@ -466,7 +480,6 @@ module.exports = grammar({
 
     expression: $ => choice(
       $.primary_expression,
-      $.glimmer_template,
       $._jsx_element,
       $.assignment_expression,
       $.augmented_assignment_expression,
@@ -494,10 +507,9 @@ module.exports = grammar({
       $.true,
       $.false,
       $.null,
-      $.import,
       $.object,
       $.array,
-      $.function,
+      $.function_expression,
       $.arrow_function,
       $.generator_function,
       $.class,
@@ -573,24 +585,6 @@ module.exports = grammar({
       ']',
     ),
 
-    glimmer_template: $ => choice(
-      seq(
-        field('open_tag', $.glimmer_opening_tag),
-        field('content', repeat($._glimmer_template_content)),
-        field('close_tag', $.glimmer_closing_tag),
-      ),
-      // empty template has no content
-      // <template></template>
-      seq(
-        field('open_tag', $.glimmer_opening_tag),
-        field('close_tag', $.glimmer_closing_tag),
-      ),
-    ),
-
-    _glimmer_template_content: _ => /.{1,}/,
-    glimmer_opening_tag: _ => seq('<template>'),
-    glimmer_closing_tag: _ => seq('</template>'),
-
     _jsx_element: $ => choice($.jsx_element, $.jsx_self_closing_element),
 
     jsx_element: $ => seq(
@@ -599,11 +593,10 @@ module.exports = grammar({
       field('close_tag', $.jsx_closing_element),
     ),
 
-    // Should not contain new lines and should not start or end with a space
-    jsx_text: _ => choice(
-      /[^{}<>\n ]([^{}<>\n]*[^{}<>\n ])?/,
-      /\/\/[^\n]*/,
-    ),
+    // An entity can be named, numeric (decimal), or numeric (hexadecimal). The
+    // longest entity name is 29 characters long, and the HTML spec says that
+    // no more will ever be added.
+    html_character_reference: _ => /&(#([xX][0-9a-fA-F]{1,6}|[0-9]{1,5})|[A-Za-z]{1,30});/,
 
     jsx_expression: $ => seq(
       '{',
@@ -617,6 +610,7 @@ module.exports = grammar({
 
     _jsx_child: $ => choice(
       $.jsx_text,
+      $.html_character_reference,
       $._jsx_element,
       $.jsx_expression,
     ),
@@ -638,9 +632,9 @@ module.exports = grammar({
     ),
 
     nested_identifier: $ => prec('member', seq(
-      choice($.identifier, alias($.nested_identifier, $.member_expression)),
+      field('object', choice($.identifier, alias($.nested_identifier, $.member_expression))),
       '.',
-      alias($.identifier, $.property_identifier),
+      field('property', alias($.identifier, $.property_identifier)),
     )),
 
     jsx_namespace_name: $ => seq($._jsx_identifier, ':', $._jsx_identifier),
@@ -676,8 +670,36 @@ module.exports = grammar({
       )),
     ),
 
+    _jsx_string: $ => choice(
+      seq(
+        '"',
+        repeat(choice(
+          alias($.unescaped_double_jsx_string_fragment, $.string_fragment),
+          $.html_character_reference,
+        )),
+        '"',
+      ),
+      seq(
+        '\'',
+        repeat(choice(
+          alias($.unescaped_single_jsx_string_fragment, $.string_fragment),
+          $.html_character_reference,
+        )),
+        '\'',
+      ),
+    ),
+
+    // Workaround to https://github.com/tree-sitter/tree-sitter/issues/1156
+    // We give names to the token() constructs containing a regexp
+    // so as to obtain a node in the CST.
+    //
+    unescaped_double_jsx_string_fragment: _ => token.immediate(prec(1, /([^"&]|&[^#A-Za-z])+/)),
+
+    // same here
+    unescaped_single_jsx_string_fragment: _ => token.immediate(prec(1, /([^'&]|&[^#A-Za-z])+/)),
+
     _jsx_attribute_value: $ => choice(
-      $.string,
+      alias($._jsx_string, $.string),
       $.jsx_expression,
       $._jsx_element,
     ),
@@ -701,7 +723,7 @@ module.exports = grammar({
 
     class_heritage: $ => seq('extends', $.expression),
 
-    function: $ => prec('literal', seq(
+    function_expression: $ => prec('literal', seq(
       optional('async'),
       'function',
       field('name', optional($.identifier)),
@@ -761,8 +783,12 @@ module.exports = grammar({
 
     call_expression: $ => choice(
       prec('call', seq(
-        field('function', $.expression),
-        field('arguments', choice($.arguments, $.template_string)),
+        field('function', choice($.expression, $.import)),
+        field('arguments', $.arguments),
+      )),
+      prec('template_call', seq(
+        field('function', choice($.primary_expression, $.new_expression)),
+        field('arguments', $.template_string),
       )),
       prec('member', seq(
         field('function', $.primary_expression),
@@ -783,7 +809,7 @@ module.exports = grammar({
     )),
 
     member_expression: $ => prec('member', seq(
-      field('object', choice($.expression, $.primary_expression)),
+      field('object', choice($.expression, $.primary_expression, $.import)),
       choice('.', field('optional_chain', $.optional_chain)),
       field('property', choice(
         $.private_property_identifier,
@@ -897,22 +923,12 @@ module.exports = grammar({
       ),
     )),
 
-    sequence_expression: $ => seq(
-      field('left', $.expression),
-      ',',
-      field('right', choice($.sequence_expression, $.expression)),
-    ),
+    sequence_expression: $ => prec.right(commaSep1($.expression)),
 
     //
     // Primitives
     //
 
-    // Here we tolerate unescaped newlines in double-quoted and
-    // single-quoted string literals.
-    // This is legal in typescript as jsx/tsx attribute values (as of
-    // 2020), and perhaps will be valid in javascript as well in the
-    // future.
-    //
     string: $ => choice(
       seq(
         '"',
@@ -936,10 +952,10 @@ module.exports = grammar({
     // We give names to the token() constructs containing a regexp
     // so as to obtain a node in the CST.
     //
-    unescaped_double_string_fragment: _ => token.immediate(prec(1, /[^"\\]+/)),
+    unescaped_double_string_fragment: _ => token.immediate(prec(1, /[^"\\\r\n]+/)),
 
     // same here
-    unescaped_single_string_fragment: _ => token.immediate(prec(1, /[^'\\]+/)),
+    unescaped_single_string_fragment: _ => token.immediate(prec(1, /[^'\\\r\n]+/)),
 
     escape_sequence: _ => token.immediate(seq(
       '\\',
@@ -948,35 +964,25 @@ module.exports = grammar({
         /[0-7]{1,3}/,
         /x[0-9a-fA-F]{2}/,
         /u[0-9a-fA-F]{4}/,
-        /u{[0-9a-fA-F]+}/,
+        /u\{[0-9a-fA-F]+\}/,
+        /[\r?][\n\u2028\u2029]/,
       ),
     )),
 
     // http://stackoverflow.com/questions/13014947/regex-to-match-a-c-style-multiline-comment/36328890#36328890
     comment: _ => token(choice(
-      seq('//', /.*/),
+      seq('//', /[^\r\n\u2028\u2029]*/),
       seq(
         '/*',
         /[^*]*\*+([^/*][^*]*\*+)*/,
         '/',
       ),
-      // https://tc39.es/ecma262/#sec-html-like-comments
-      seq('<!--', /.*/),
-      // This allows code to exist before this token on the same line.
-      //
-      // Technically, --> is supposed to have nothing before it on the same line
-      // except for comments and whitespace, but that is difficult to express,
-      // and in general tree sitter grammars tend to prefer to be overly
-      // permissive anyway.
-      //
-      // This approach does not appear to cause problems in practice.
-      seq('-->', /.*/),
     )),
 
     template_string: $ => seq(
       '`',
       repeat(choice(
-        $._template_chars,
+        alias($._template_chars, $.string_fragment),
         $.escape_sequence,
         $.template_substitution,
       )),
@@ -992,7 +998,7 @@ module.exports = grammar({
     regex: $ => seq(
       '/',
       field('pattern', $.regex_pattern),
-      token.immediate('/'),
+      token.immediate(prec(1, '/')),
       optional(field('flags', $.regex_flags)),
     ),
 
@@ -1014,39 +1020,39 @@ module.exports = grammar({
     regex_flags: _ => token.immediate(/[a-z]+/),
 
     number: _ => {
-      const hex_literal = seq(
+      const hexLiteral = seq(
         choice('0x', '0X'),
         /[\da-fA-F](_?[\da-fA-F])*/,
       );
 
-      const decimal_digits = /\d(_?\d)*/;
-      const signed_integer = seq(optional(choice('-', '+')), decimal_digits);
-      const exponent_part = seq(choice('e', 'E'), signed_integer);
+      const decimalDigits = /\d(_?\d)*/;
+      const signedInteger = seq(optional(choice('-', '+')), decimalDigits);
+      const exponentPart = seq(choice('e', 'E'), signedInteger);
 
-      const binary_literal = seq(choice('0b', '0B'), /[0-1](_?[0-1])*/);
+      const binaryLiteral = seq(choice('0b', '0B'), /[0-1](_?[0-1])*/);
 
-      const octal_literal = seq(choice('0o', '0O'), /[0-7](_?[0-7])*/);
+      const octalLiteral = seq(choice('0o', '0O'), /[0-7](_?[0-7])*/);
 
-      const bigint_literal = seq(choice(hex_literal, binary_literal, octal_literal, decimal_digits), 'n');
+      const bigintLiteral = seq(choice(hexLiteral, binaryLiteral, octalLiteral, decimalDigits), 'n');
 
-      const decimal_integer_literal = choice(
+      const decimalIntegerLiteral = choice(
         '0',
-        seq(optional('0'), /[1-9]/, optional(seq(optional('_'), decimal_digits))),
+        seq(optional('0'), /[1-9]/, optional(seq(optional('_'), decimalDigits))),
       );
 
-      const decimal_literal = choice(
-        seq(decimal_integer_literal, '.', optional(decimal_digits), optional(exponent_part)),
-        seq('.', decimal_digits, optional(exponent_part)),
-        seq(decimal_integer_literal, exponent_part),
-        seq(decimal_digits),
+      const decimalLiteral = choice(
+        seq(decimalIntegerLiteral, '.', optional(decimalDigits), optional(exponentPart)),
+        seq('.', decimalDigits, optional(exponentPart)),
+        seq(decimalIntegerLiteral, exponentPart),
+        decimalDigits,
       );
 
       return token(choice(
-        hex_literal,
-        decimal_literal,
-        binary_literal,
-        octal_literal,
-        bigint_literal,
+        hexLiteral,
+        decimalLiteral,
+        binaryLiteral,
+        octalLiteral,
+        bigintLiteral,
       ));
     },
 
@@ -1061,22 +1067,20 @@ module.exports = grammar({
     ),
 
     identifier: _ => {
-      // eslint-disable-next-line max-len
-      const alpha = /[^\x00-\x1F\s\p{Zs}0-9:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
-      // eslint-disable-next-line max-len
-      const alphanumeric = /[^\x00-\x1F\s\p{Zs}:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
+      const alpha = /[^\x00-\x1F\s\p{Zs}0-9:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B\u2028\u2029]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
+
+      const alphanumeric = /[^\x00-\x1F\s\p{Zs}:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B\u2028\u2029]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
       return token(seq(alpha, repeat(alphanumeric)));
     },
 
     private_property_identifier: _ => {
-      // eslint-disable-next-line max-len
-      const alpha = /[^\x00-\x1F\s\p{Zs}0-9:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
-      // eslint-disable-next-line max-len
-      const alphanumeric = /[^\x00-\x1F\s\p{Zs}:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
+      const alpha = /[^\x00-\x1F\s\p{Zs}0-9:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B\u2028\u2029]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
+
+      const alphanumeric = /[^\x00-\x1F\s\p{Zs}:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B\u2028\u2029]|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}/;
       return token(seq('#', alpha, repeat(alphanumeric)));
     },
 
-    meta_property: _ => seq('new', '.', 'target'),
+    meta_property: _ => choice(seq('new', '.', 'target'), seq('import', '.', 'meta')),
 
     this: _ => 'this',
     super: _ => 'super',
@@ -1127,7 +1131,7 @@ module.exports = grammar({
         seq(field('member', $.method_definition), optional(';')),
         seq(field('member', $.field_definition), $._semicolon),
         field('member', $.class_static_block),
-        field('template', $.glimmer_template),
+        ';',
       )),
       '}',
     ),
@@ -1150,6 +1154,7 @@ module.exports = grammar({
 
     class_static_block: $ => seq(
       'static',
+      optional($._automatic_semicolon),
       field('body', $.statement_block),
     ),
 
@@ -1168,7 +1173,10 @@ module.exports = grammar({
 
     method_definition: $ => seq(
       repeat(field('decorator', $.decorator)),
-      optional(choice('static', alias(token(seq('static', /\s+/, 'get', /\s*\n/)), 'static get'))),
+      optional(choice(
+        'static',
+        alias(token(seq('static', /\s+/, 'get', /\s*\n/)), 'static get'),
+      )),
       optional('async'),
       optional(choice('get', 'set', '*')),
       field('name', $._property_name),
@@ -1189,10 +1197,10 @@ module.exports = grammar({
     ),
 
     _property_name: $ => choice(
-      alias(choice(
-        $.identifier,
-        $._reserved_identifier,
-      ), $.property_identifier),
+      alias(
+        choice($.identifier, $._reserved_identifier),
+        $.property_identifier,
+      ),
       $.private_property_identifier,
       $.string,
       $.number,
@@ -1211,6 +1219,7 @@ module.exports = grammar({
       'async',
       'static',
       'export',
+      'let',
     ),
 
     _semicolon: $ => choice($._automatic_semicolon, ';'),
@@ -1222,8 +1231,7 @@ module.exports = grammar({
  *
  * @param {Rule} rule
  *
- * @return {SeqRule}
- *
+ * @returns {SeqRule}
  */
 function commaSep1(rule) {
   return seq(rule, repeat(seq(',', rule)));
@@ -1234,8 +1242,7 @@ function commaSep1(rule) {
  *
  * @param {Rule} rule
  *
- * @return {ChoiceRule}
- *
+ * @returns {ChoiceRule}
  */
 function commaSep(rule) {
   return optional(commaSep1(rule));

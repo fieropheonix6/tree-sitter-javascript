@@ -2,37 +2,36 @@
 import PackageDescription
 
 let package = Package(
-    name: "TreeSitterJS",
+    name: "TreeSitterJavaScript",
     products: [
-        .library(name: "TreeSitterJS", targets: ["TreeSitterJS"]),
+        .library(name: "TreeSitterJavaScript", targets: ["TreeSitterJavaScript"]),
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/ChimeHQ/SwiftTreeSitter", from: "0.8.0"),
+    ],
     targets: [
-        .target(name: "TreeSitterJS",
-                path: ".",
-                exclude: [
-                    "binding.gyp",
-                    "bindings",
-                    "Cargo.toml",
-                    "corpus",
-                    "grammar.js",
-                    "LICENSE",
-                    "Makefile",
-                    "package.json",
-                    "README.md",
-                    "script",
-                    "src/grammar.json",
-                    "src/node-types.json",
-                    "*.wasm",
-                ],
-                sources: [
-                    "src/parser.c",
-                    "src/scanner.c",
-                ],
-                resources: [
-                    .copy("queries")
-                ],
-                publicHeadersPath: "bindings/swift",
-                cSettings: [.headerSearchPath("src")])
-    ]
+        .target(
+            name: "TreeSitterJavaScript",
+            dependencies: [],
+            path: ".",
+            sources: [
+                "src/parser.c",
+                "src/scanner.c",
+            ],
+            resources: [
+                .copy("queries")
+            ],
+            publicHeadersPath: "bindings/swift",
+            cSettings: [.headerSearchPath("src")]
+        ),
+        .testTarget(
+            name: "TreeSitterJavaScriptTests",
+            dependencies: [
+                "SwiftTreeSitter",
+                "TreeSitterJavaScript",
+            ],
+            path: "bindings/swift/TreeSitterJavaScriptTests"
+        )
+    ],
+    cLanguageStandard: .c11
 )
